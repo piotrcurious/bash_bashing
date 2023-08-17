@@ -97,14 +97,26 @@ draw_graph() {
 
 # A function to clear the framebuffer with black color
 # Usage: clear_screen
-clear_screen() {
-  busybox dd if=/dev/zero bs=$SCREEN_SIZE count=1 2>/dev/null | busybox dd of=$FRAMEBUFFER bs=$SCREEN_SIZE count=1 conv=notrunc 2>/dev/null # Write zeros to the framebuffer with the screen size
-}
+#clear_screen() {
+#  busybox dd if=/dev/zero bs=$SCREEN_SIZE count=1 2>/dev/null | busybox dd of=$FRAMEBUFFER bs=$SCREEN_SIZE count=1 conv=notrunc 2>/dev/null # Write zeros to the framebuffer with the screen size
+#}
 
 # A function to shift the framebuffer to the left by one pixel
 # Usage: shift_screen
 shift_screen() {
   busybox dd if=$FRAMEBUFFER bs=1 skip=2 count=$((SCREEN_SIZE - 2)) 2>/dev/null | busybox dd of=$FRAMEBUFFER bs=1 seek=0 count=$((SCREEN_SIZE - 2)) conv=notrunc 2>/dev/null # Copy the framebuffer content from offset 2 to offset 0 with the size minus 2 bytes 
+}
+
+shift_screen() {
+#Get the number of rows in the framebuffer
+  local rows=$((SCREEN_SIZE / (4 * SCREEN_WIDTH)))
+#Loop over each row
+  for ((i=0; i<rows; i++)); do
+# Calculate the offset of the current row in bytes
+     local offset=$((i * 4 * SCREEN_WIDTH))
+# Copy the content from the second pixel to the first pixel, and so on, until the end of the row
+     busybox dd if=FRAMEBUFFERbs=4skip=((offset + 1)) count=$((SCREEN_WIDTH - 1)) 2>/dev/null | busybox dd of=$FRAMEBUFFER bs=4 seek=offsetcount=((SCREEN_WIDTH - 1)) conv=notrunc 2>/dev/null
+  done
 }
 
 # A function to read a line from the serial port
