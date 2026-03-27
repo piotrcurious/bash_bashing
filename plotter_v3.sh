@@ -9,7 +9,7 @@ BPP=2 # 16-bit RGB565
 
 # Graph area
 GRAPH_X=50
-GRAPH_Y=80 # Room for legends
+GRAPH_Y=80
 GRAPH_W=700
 GRAPH_H=470
 
@@ -22,12 +22,9 @@ GRID_LINE=$(printf "$COLOR_GRID"%.0s {1..700})
 WORK_FB="/tmp/fb_work"
 TEMPLATE_FB="/tmp/fb_template"
 
-echo "Initializing v3.2 plotter (fixing x-scaling)..."
+echo "Initializing v3.4 plotter (final scrolling/scaling fix)..."
 
-# Initial screen clear
-dd if=/dev/zero of="$FB_FILE" bs=$((WIDTH * HEIGHT * BPP)) count=1 conv=notrunc 2>/dev/null
-
-# Pre-calculate a background template (grid)
+# Pre-calculate template
 dd if=/dev/zero of="$TEMPLATE_FB" bs=$((WIDTH * HEIGHT * BPP)) count=1 2>/dev/null
 for ((y=GRAPH_Y; y<GRAPH_Y+GRAPH_H; y++)); do
     offset=$(( (y * WIDTH + GRAPH_X) * BPP ))
@@ -39,18 +36,17 @@ for ((y=GRAPH_Y; y<GRAPH_Y+GRAPH_H; y++)); do
     fi
 done
 
-echo "Starting v3.2 live loop..."
+echo "Starting v3.4 live loop..."
 
 history=()
-max_history=30
-frame_count=0
+max_history=50
 
 exec 3< "$SERIAL_PORT"
 
 while read -r line <&3; do
     [[ -z "$line" ]] && continue
 
-    # Update history
+    # Update history: Newest point is at the END of the array
     history+=("$line")
     [[ ${#history[@]} -gt $max_history ]] && history=("${history[@]:1}")
 
@@ -72,8 +68,10 @@ while read -r line <&3; do
     range=$(( max_all - min_all ))
     [[ $range -le 0 ]] && range=1
 
+    # Atomic update via double buffer
     cat "$TEMPLATE_FB" > "$WORK_FB"
 
+    # Legends
     IFS=',' read -ra CHANNELS <<< "${history[0]}"
     num_channels=${#CHANNELS[@]}
     for ((ch=0; ch<num_channels; ch++)); do
@@ -95,17 +93,12 @@ while read -r line <&3; do
         [[ $ch -ge ${#COLORS[@]} ]] && break
         color=${COLORS[$ch]}
 
+        # Consistent X mapping: newest point is ALWAYS at the right edge if history is full.
+        # Otherwise, the plot grows from the left.
+
+        # Initial point
         IFS=',' read -ra ADDR <<< "${history[0]}"
         val=${ADDR[$ch]%.*}
-
-        # Consistent X calculation for history offset
-        # X should start at GRAPH_X regardless of current num_points
-        # to ensure it looks like it's entering from the right.
-        # But for "scrolling window", we always want current history to fill 0..GRAPH_W.
-
-        # Correction: The history fills from left to right as it grows.
-        # When full, it spans GRAPH_W.
-
         prev_x=$GRAPH_X
         prev_y=$(( GRAPH_Y + GRAPH_H - ( (val - min_all) * GRAPH_H / range ) ))
         [[ $prev_y -lt $GRAPH_Y ]] && prev_y=$GRAPH_Y
@@ -115,13 +108,13 @@ while read -r line <&3; do
             IFS=',' read -ra ADDR <<< "${history[$i]}"
             val=${ADDR[$ch]%.*}
 
-            # X scaling must account for max_history to be "correct"
-            x=$(( GRAPH_X + (i * (GRAPH_W - 1)) / (max_history - 1) ))
+            # X scaling: (i * GRAPH_W) / (max_history - 1)
+            x=$(( GRAPH_X + (i * GRAPH_W) / (max_history - 1) ))
             y=$(( GRAPH_Y + GRAPH_H - ( (val - min_all) * GRAPH_H / range ) ))
             [[ $y -lt $GRAPH_Y ]] && y=$GRAPH_Y
             [[ $y -ge $((GRAPH_Y+GRAPH_H)) ]] && y=$((GRAPH_Y+GRAPH_H-1))
 
-            # Line drawing
+            # Bresenham's
             dx=$(( x - prev_x ))
             dy=$(( y - prev_y ))
             sx=$(( dx > 0 ? 1 : -1 ))
@@ -144,7 +137,6 @@ while read -r line <&3; do
         done
     done
 
+    # Atomic update
     cat "$WORK_FB" > "$FB_FILE"
-    frame_count=$(( frame_count + 1 ))
-    echo "Frame $frame_count drawn."
 done
