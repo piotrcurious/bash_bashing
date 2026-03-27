@@ -13,18 +13,21 @@ GRAPH_Y=80
 GRAPH_W=700
 GRAPH_H=470
 
-# RGB565 Colors (Little Endian)
+# Colors (Little Endian RGB565)
 COLORS=("\x00\xF8" "\xE0\x07" "\x1F\x00" "\xE0\xFF" "\xFF\x07" "\x1F\xF8")
-COLOR_GRID="\x08\x42" # Dark Grey
+COLOR_GRID="\x08\x42"
 COLOR_BLACK="\x00\x00"
 
 GRID_LINE=$(printf "$COLOR_GRID"%.0s {1..700})
 WORK_FB="/tmp/fb_work"
 TEMPLATE_FB="/tmp/fb_template"
 
-echo "Initializing v3.4 plotter (final scrolling/scaling fix)..."
+echo "Initializing v3.5 plotter (optimizing for scrolling test)..."
 
-# Pre-calculate template
+# Initial full screen clear
+dd if=/dev/zero of="$FB_FILE" bs=$((WIDTH * HEIGHT * BPP)) count=1 conv=notrunc 2>/dev/null
+
+# Pre-calculate a background template (grid)
 dd if=/dev/zero of="$TEMPLATE_FB" bs=$((WIDTH * HEIGHT * BPP)) count=1 2>/dev/null
 for ((y=GRAPH_Y; y<GRAPH_Y+GRAPH_H; y++)); do
     offset=$(( (y * WIDTH + GRAPH_X) * BPP ))
@@ -36,17 +39,18 @@ for ((y=GRAPH_Y; y<GRAPH_Y+GRAPH_H; y++)); do
     fi
 done
 
-echo "Starting v3.4 live loop..."
+echo "Starting v3.5 live loop..."
 
 history=()
-max_history=50
+max_history=20 # Reduced for faster processing in pure Bash
+frame_count=0
 
 exec 3< "$SERIAL_PORT"
 
 while read -r line <&3; do
     [[ -z "$line" ]] && continue
 
-    # Update history: Newest point is at the END of the array
+    # Update history (scrolling logic)
     history+=("$line")
     [[ ${#history[@]} -gt $max_history ]] && history=("${history[@]:1}")
 
@@ -62,7 +66,6 @@ while read -r line <&3; do
             [[ $val -gt $curr_max ]] && curr_max=$val
         done
     done
-
     min_all=$(( curr_min - 5 ))
     max_all=$(( curr_max + 5 ))
     range=$(( max_all - min_all ))
@@ -71,7 +74,7 @@ while read -r line <&3; do
     # Atomic update via double buffer
     cat "$TEMPLATE_FB" > "$WORK_FB"
 
-    # Legends
+    # Draw legends (boxes)
     IFS=',' read -ra CHANNELS <<< "${history[0]}"
     num_channels=${#CHANNELS[@]}
     for ((ch=0; ch<num_channels; ch++)); do
@@ -88,18 +91,15 @@ while read -r line <&3; do
     num_points=${#history[@]}
     [[ $num_points -lt 2 ]] && continue
 
-    # Plot all channels
+    # Plot channels
     for ((ch=0; ch<num_channels; ch++)); do
         [[ $ch -ge ${#COLORS[@]} ]] && break
         color=${COLORS[$ch]}
 
-        # Consistent X mapping: newest point is ALWAYS at the right edge if history is full.
-        # Otherwise, the plot grows from the left.
-
-        # Initial point
         IFS=',' read -ra ADDR <<< "${history[0]}"
         val=${ADDR[$ch]%.*}
         prev_x=$GRAPH_X
+        # Scale Y
         prev_y=$(( GRAPH_Y + GRAPH_H - ( (val - min_all) * GRAPH_H / range ) ))
         [[ $prev_y -lt $GRAPH_Y ]] && prev_y=$GRAPH_Y
         [[ $prev_y -ge $((GRAPH_Y+GRAPH_H)) ]] && prev_y=$((GRAPH_Y+GRAPH_H-1))
@@ -108,13 +108,13 @@ while read -r line <&3; do
             IFS=',' read -ra ADDR <<< "${history[$i]}"
             val=${ADDR[$ch]%.*}
 
-            # X scaling: (i * GRAPH_W) / (max_history - 1)
-            x=$(( GRAPH_X + (i * GRAPH_W) / (max_history - 1) ))
+            # X scaling: ensures data covers the full GRAPH_W when history is full.
+            x=$(( GRAPH_X + (i * (GRAPH_W - 1)) / (max_history - 1) ))
             y=$(( GRAPH_Y + GRAPH_H - ( (val - min_all) * GRAPH_H / range ) ))
             [[ $y -lt $GRAPH_Y ]] && y=$GRAPH_Y
             [[ $y -ge $((GRAPH_Y+GRAPH_H)) ]] && y=$((GRAPH_Y+GRAPH_H-1))
 
-            # Bresenham's
+            # Pure Bash line drawing
             dx=$(( x - prev_x ))
             dy=$(( y - prev_y ))
             sx=$(( dx > 0 ? 1 : -1 ))
@@ -139,4 +139,6 @@ while read -r line <&3; do
 
     # Atomic update
     cat "$WORK_FB" > "$FB_FILE"
+    frame_count=$(( frame_count + 1 ))
+    echo "Frame $frame_count drawn at $(date +%T)."
 done
